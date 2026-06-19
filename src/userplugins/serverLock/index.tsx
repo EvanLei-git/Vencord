@@ -21,9 +21,18 @@ const ITEM_PREFIX = "guildsnav___";
 
 // Mouse/pointer events we intercept on locked servers. "contextmenu" is
 // deliberately NOT in here so right-clicking a locked server still opens the
-// menu (that's how you unlock it).
-const BLOCKED_EVENTS = ["click", "mousedown", "mouseup", "pointerdown", "pointerup", "mouseover", "pointerover"];
-const HOVER_EVENTS = new Set(["mouseover", "pointerover"]);
+// menu (that's how you unlock it). The *enter*/*move* events matter too: the
+// "people in voice" popout is triggered by a direct mouseenter/pointerenter
+// listener, not by the mouseover delegation React uses for tooltips.
+const BLOCKED_EVENTS = [
+    "click", "mousedown", "mouseup", "pointerdown", "pointerup",
+    "mouseover", "mouseenter", "mousemove",
+    "pointerover", "pointerenter", "pointermove"
+];
+const HOVER_EVENTS = new Set([
+    "mouseover", "mouseenter", "mousemove",
+    "pointerover", "pointerenter", "pointermove"
+]);
 
 // Source of truth, kept in memory and mirrored to DataStore.
 let lockedGuilds = new Set<string>();
@@ -173,7 +182,11 @@ export default definePlugin({
             // ever stops matching after a Discord update.
             find: '"NowPlayingViewStore"',
             replacement: {
-                match: /(getVoiceStateForUser\((\i)\).{0,150}?)(&&\i\.\i\.canWithPartialContext.{0,20}VIEW_CHANNEL)/,
+                // Anchor on the same spot ShowHiddenChannels uses. The arg to
+                // getVoiceStateForUser is the user id (a bare ident OR a member
+                // expression like e.id), so capture it loosely and AND in our
+                // locked-guild check right before the VIEW_CHANNEL permission test.
+                match: /(getVoiceStateForUser\(([^)]+?)\).{0,150}?)(&&\i\.\i\.canWithPartialContext.{0,20}VIEW_CHANNEL)/,
                 replace: "$1&&!$self.isUserVoiceLocked($2)$3"
             }
         }
