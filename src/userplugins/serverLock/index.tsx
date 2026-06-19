@@ -10,7 +10,7 @@ import { definePluginSettings } from "@api/Settings";
 import { useForceUpdater } from "@utils/react";
 import definePlugin, { OptionType } from "@utils/types";
 import { Guild } from "@vencord/discord-types";
-import { Button, ChannelStore, ContextMenuApi, Forms, GuildStore, Menu, React, SelectedGuildStore, VoiceStateStore } from "@webpack/common";
+import { Button, ContextMenuApi, Forms, GuildStore, Menu, React, SelectedGuildStore } from "@webpack/common";
 
 const DATA_KEY = "ServerLock_lockedGuilds";
 const STYLE_ID = "vc-serverlock-style";
@@ -38,6 +38,53 @@ function setLocked(guildId: string, locked: boolean) {
     persist();
     updateLockStyle();
     updateOverlay();
+    applyActiveNowFilter();
+}
+
+// ----- Active Now panel filtering --------------------------------------------
+// Each voice card in the "Active Now" panel embeds the server's icon, and the
+// icon URL contains the guild id (…/icons/<guildId>/…). We read that straight
+// from the rendered DOM and hide cards belonging to a locked guild — no webpack
+// patch, so it can't break when Discord reshuffles its internal modules.
+const ACTIVE_NOW_CARD = '[class*="itemCard"]';
+const VOICE_SECTION = '[class*="voiceSectionAssets"],[class*="voiceSectionDetails"]';
+
+function cardGuildId(card: HTMLElement): string | null {
+    const img = card.querySelector("img[src*=\"/icons/\"]");
+    const m = img && /\/icons\/(\d+)\//.exec(img.getAttribute("src") || "");
+    if (m) return m[1];
+
+    // Icon-less server: fall back to matching the displayed server name.
+    const nameEl = card.querySelector('[class*="voiceSectionText"],[class*="voiceSectionDetails"]');
+    const name = nameEl?.textContent?.trim();
+    if (name) {
+        for (const id of lockedGuilds)
+            if (GuildStore.getGuild(id)?.name === name) return id;
+    }
+    return null;
+}
+
+function applyActiveNowFilter() {
+    const filter = settings.store.filterActiveNow;
+    const cards = new Set<HTMLElement>();
+    document.querySelectorAll<HTMLElement>(VOICE_SECTION).forEach(el => {
+        const card = el.closest<HTMLElement>(ACTIVE_NOW_CARD);
+        if (card) cards.add(card);
+    });
+    cards.forEach(card => {
+        const id = cardGuildId(card);
+        card.style.display = filter && !!id && lockedGuilds.has(id) ? "none" : "";
+    });
+}
+
+let activeNowObserver: MutationObserver | null = null;
+let scanTimer: number | null = null;
+function scheduleActiveNowScan() {
+    if (scanTimer != null) return;
+    scanTimer = window.setTimeout(() => {
+        scanTimer = null;
+        applyActiveNowFilter();
+    }, 120);
 }
 
 // "LOCKED" screen shown over the channel list + chat (the middle/right) when a
@@ -171,7 +218,8 @@ const settings = definePluginSettings({
     filterActiveNow: {
         type: OptionType.BOOLEAN,
         description: "Hide voice activity from locked servers in the \"Active Now\" panel on the home page",
-        default: true
+        default: true,
+        onChange: () => applyActiveNowFilter()
     },
     lockedList: {
         type: OptionType.COMPONENT,
@@ -241,35 +289,6 @@ export default definePlugin({
         "guild-header-popout": guildContextPatch
     },
 
-    patches: [
-        {
-            // The "Active Now" panel (NowPlayingViewStore) builds a card per
-            // friend from their voice state. We AND a locked-guild check into the
-            // same condition ShowHiddenChannels anchors on, so a card for someone
-            // sitting in a locked server's voice channel is never rendered.
-            // NOTE: this is the most update-fragile part — see README.md if it
-            // ever stops matching after a Discord update.
-            find: '"NowPlayingViewStore"',
-            replacement: {
-                // Anchor on the same spot ShowHiddenChannels uses. The arg to
-                // getVoiceStateForUser is the user id (a bare ident OR a member
-                // expression like e.id), so capture it loosely and AND in our
-                // locked-guild check right before the VIEW_CHANNEL permission test.
-                match: /(getVoiceStateForUser\(([^)]+?)\).{0,150}?)(&&\i\.\i\.canWithPartialContext.{0,20}VIEW_CHANNEL)/,
-                replace: "$1&&!$self.isUserVoiceLocked($2)$3"
-            }
-        }
-    ],
-
-    // Called from the Active Now patch above.
-    isUserVoiceLocked(userId: string): boolean {
-        if (!settings.store.filterActiveNow) return false;
-        const voiceState = VoiceStateStore.getVoiceStateForUser(userId);
-        if (!voiceState?.channelId) return false;
-        const channel = ChannelStore.getChannel(voiceState.channelId);
-        return isGuildLocked(channel?.guild_id);
-    },
-
     async start() {
         const stored = await DataStore.get(DATA_KEY);
         // Tolerate an older array-shaped value as well as a Set.
@@ -283,12 +302,30 @@ export default definePlugin({
         SelectedGuildStore.addChangeListener(updateOverlay);
         window.addEventListener("resize", updateOverlay);
         updateOverlay();
+
+        // Filter the Active Now panel by watching the DOM for new voice cards.
+        activeNowObserver = new MutationObserver(scheduleActiveNowScan);
+        activeNowObserver.observe(document.body, { childList: true, subtree: true });
+        applyActiveNowFilter();
     },
 
     stop() {
         document.removeEventListener("contextmenu", onServerContextMenu, true);
         SelectedGuildStore.removeChangeListener(updateOverlay);
         window.removeEventListener("resize", updateOverlay);
+
+        activeNowObserver?.disconnect();
+        activeNowObserver = null;
+        if (scanTimer != null) {
+            clearTimeout(scanTimer);
+            scanTimer = null;
+        }
+        // Un-hide any Active Now cards we had hidden.
+        document.querySelectorAll<HTMLElement>(VOICE_SECTION).forEach(el => {
+            const card = el.closest<HTMLElement>(ACTIVE_NOW_CARD);
+            if (card) card.style.display = "";
+        });
+
         document.getElementById(STYLE_ID)?.remove();
         document.getElementById(OVERLAY_ID)?.remove();
         document.getElementById(OVERLAY_STYLE_ID)?.remove();

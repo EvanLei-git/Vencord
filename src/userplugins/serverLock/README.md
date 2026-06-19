@@ -21,7 +21,7 @@ Right-clicking still works on a locked server, so to **unlock** it just right-cl
   - Clicks and hover are blocked by a capture-phase event listener on `document` (it never blocks right-click, which is why the unlock menu keeps working).
   - If a Discord update changes that attribute, update `ITEM_PREFIX` in `index.tsx`. Worst case the lock simply stops applying — you're never locked *out*, because right-click always works.
 
-- **Active Now filtering** is the fragile part: it's a webpack `patch` on `NowPlayingViewStore`. If a Discord update changes that module, Vencord will log a patch-failure for `ServerLock` in the console and the rest of the plugin keeps working. To fix the regex, enable Vencord's reporter/dev tooling, find `NowPlayingViewStore`, and re-anchor the `match` around its `getVoiceStateForUser(...)` call. You can also turn this feature off in the plugin settings (`filterActiveNow`).
+- **Active Now filtering** reads the rendered DOM (no webpack patch). Each voice card embeds the server's icon, whose URL contains the guild id (`…/icons/<guildId>/…`); a `MutationObserver` hides any card belonging to a locked guild (icon-less servers fall back to matching the server name). Turn it off with the `filterActiveNow` setting. If a Discord update renames the card/section classes, update `ACTIVE_NOW_CARD` / `VOICE_SECTION` in `index.tsx`.
 
 ## Settings
 
