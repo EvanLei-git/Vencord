@@ -10,6 +10,7 @@ Right-click any server in the left sidebar and choose **LOCKED**. While a server
 - It is **not clickable** — left-clicking it does nothing, so you can't accidentally open it.
 - **No tooltip** appears when you hover it.
 - Its **voice activity is hidden** from the **Active Now** panel on the home/friends page (e.g. a friend sitting in that server's voice channel won't show up).
+- If its **content is opened anyway** (e.g. you follow an **invite link** into it), a gray **LOCKED** screen covers the channel list + chat. The left server rail stays clickable so you can navigate away to another server.
 
 Right-clicking still works on a locked server, so to **unlock** it just right-click again and untick **LOCKED**. You can also see and unlock every locked server from the plugin's settings page.
 

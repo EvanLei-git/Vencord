@@ -10,10 +10,12 @@ import { definePluginSettings } from "@api/Settings";
 import { useForceUpdater } from "@utils/react";
 import definePlugin, { OptionType } from "@utils/types";
 import { Guild } from "@vencord/discord-types";
-import { Button, ChannelStore, Forms, GuildStore, Menu, React, VoiceStateStore } from "@webpack/common";
+import { Button, ChannelStore, Forms, GuildStore, Menu, React, SelectedGuildStore, VoiceStateStore } from "@webpack/common";
 
 const DATA_KEY = "ServerLock_lockedGuilds";
 const STYLE_ID = "vc-serverlock-style";
+const OVERLAY_ID = "vc-serverlock-overlay";
+const OVERLAY_STYLE_ID = "vc-serverlock-overlay-style";
 // Discord tags each server in the left sidebar with this DOM attribute:
 //   data-list-item-id="guildsnav___<guildId>"
 // We rely on it both for the grey-out CSS and the click/hover blocking.
@@ -50,6 +52,54 @@ function setLocked(guildId: string, locked: boolean) {
     else lockedGuilds.delete(guildId);
     persist();
     updateLockStyle();
+    updateOverlay();
+}
+
+// "LOCKED" screen shown over the channel list + chat (the middle/right) when a
+// locked server's content is open — e.g. you followed an invite link into it.
+// It deliberately stops at the left server rail so you can click another server
+// to leave. Plain DOM + a Flux change listener; no webpack patch needed.
+const OVERLAY_CSS =
+    `#${OVERLAY_ID}{position:fixed;right:0;bottom:0;z-index:100;display:flex;` +
+    "align-items:center;justify-content:center;" +
+    "background:var(--background-base-lower,var(--background-primary,#2b2d31));}" +
+    `#${OVERLAY_ID}::after{content:"LOCKED";color:var(--text-muted,#949ba4);` +
+    "font-size:52px;font-weight:800;letter-spacing:8px;opacity:.5;}";
+
+function ensureOverlayStyle() {
+    if (document.getElementById(OVERLAY_STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = OVERLAY_STYLE_ID;
+    style.textContent = OVERLAY_CSS;
+    document.head.appendChild(style);
+}
+
+// Anchor the overlay to the right edge / top of the left server rail so it
+// covers everything to the right of it (channels + chat) but not the rail
+// itself, and never the window title bar above the rail.
+function positionOverlay(el: HTMLElement) {
+    const scroller = document.querySelector('[data-list-id="guildsnav"]');
+    const rail = scroller?.closest("nav") ?? scroller?.parentElement ?? scroller;
+    const rect = rail?.getBoundingClientRect();
+    el.style.left = `${rect ? Math.ceil(rect.right) : 72}px`;
+    el.style.top = `${rect ? Math.max(0, Math.floor(rect.top)) : 0}px`;
+}
+
+function updateOverlay() {
+    const locked = isGuildLocked(SelectedGuildStore?.getGuildId?.());
+    let el = document.getElementById(OVERLAY_ID);
+
+    if (!locked) {
+        el?.remove();
+        return;
+    }
+
+    if (!el) {
+        el = document.createElement("div");
+        el.id = OVERLAY_ID;
+        document.body.appendChild(el);
+    }
+    positionOverlay(el);
 }
 
 // Inject a single <style> element that greys out every locked server icon.
@@ -162,7 +212,7 @@ const guildContextPatch: NavContextMenuPatchCallback = (children, { guild }: { g
 
 export default definePlugin({
     name: "ServerLock",
-    description: "Right-click a server and choose \"LOCKED\" to grey it out, make it un-clickable, suppress its hover tooltip, and hide its voice activity from the \"Active Now\" panel. Right-click again to unlock.",
+    description: "Right-click a server and choose \"LOCKED\" to grey it out, make it un-clickable, suppress its hover tooltip, hide its voice activity from the \"Active Now\" panel, and show a gray LOCKED screen if its content is opened (e.g. via an invite link). Right-click again to unlock.",
     authors: [{ name: "Evan", id: 0n }],
     tags: ["Servers", "Privacy", "Utility"],
     settings,
@@ -207,11 +257,21 @@ export default definePlugin({
         lockedGuilds = stored instanceof Set ? stored : new Set(Array.isArray(stored) ? stored : []);
 
         updateLockStyle();
+        ensureOverlayStyle();
         for (const ev of BLOCKED_EVENTS) document.addEventListener(ev, onCapture, true);
+
+        // Show/hide the LOCKED screen as the selected server changes.
+        SelectedGuildStore.addChangeListener(updateOverlay);
+        window.addEventListener("resize", updateOverlay);
+        updateOverlay();
     },
 
     stop() {
         for (const ev of BLOCKED_EVENTS) document.removeEventListener(ev, onCapture, true);
+        SelectedGuildStore.removeChangeListener(updateOverlay);
+        window.removeEventListener("resize", updateOverlay);
         document.getElementById(STYLE_ID)?.remove();
+        document.getElementById(OVERLAY_ID)?.remove();
+        document.getElementById(OVERLAY_STYLE_ID)?.remove();
     }
 });
