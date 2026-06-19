@@ -10,7 +10,7 @@ import { definePluginSettings } from "@api/Settings";
 import { useForceUpdater } from "@utils/react";
 import definePlugin, { OptionType } from "@utils/types";
 import { Guild } from "@vencord/discord-types";
-import { Button, ChannelStore, Forms, GuildStore, Menu, React, SelectedGuildStore, VoiceStateStore } from "@webpack/common";
+import { Button, ChannelStore, ContextMenuApi, Forms, GuildStore, Menu, React, SelectedGuildStore, VoiceStateStore } from "@webpack/common";
 
 const DATA_KEY = "ServerLock_lockedGuilds";
 const STYLE_ID = "vc-serverlock-style";
@@ -20,21 +20,6 @@ const OVERLAY_STYLE_ID = "vc-serverlock-overlay-style";
 //   data-list-item-id="guildsnav___<guildId>"
 // We rely on it both for the grey-out CSS and the click/hover blocking.
 const ITEM_PREFIX = "guildsnav___";
-
-// Mouse/pointer events we intercept on locked servers. "contextmenu" is
-// deliberately NOT in here so right-clicking a locked server still opens the
-// menu (that's how you unlock it). The *enter*/*move* events matter too: the
-// "people in voice" popout is triggered by a direct mouseenter/pointerenter
-// listener, not by the mouseover delegation React uses for tooltips.
-const BLOCKED_EVENTS = [
-    "click", "mousedown", "mouseup", "pointerdown", "pointerup",
-    "mouseover", "mouseenter", "mousemove",
-    "pointerover", "pointerenter", "pointermove"
-];
-const HOVER_EVENTS = new Set([
-    "mouseover", "mouseenter", "mousemove",
-    "pointerover", "pointerenter", "pointermove"
-]);
 
 // Source of truth, kept in memory and mirrored to DataStore.
 let lockedGuilds = new Set<string>();
@@ -123,29 +108,63 @@ function updateLockStyle() {
         .map(id => `[data-list-item-id="${ITEM_PREFIX}${id}"]`)
         .join(",");
 
-    el.textContent = `${selector}{filter:grayscale(1) brightness(.65);opacity:.5;cursor:default!important;}`;
+    // pointer-events:none makes the icon physically inert — no hover popout,
+    // no tooltip, no click — far more reliable than intercepting events.
+    el.textContent = `${selector}{filter:grayscale(1) brightness(.65);opacity:.5;pointer-events:none!important;cursor:default!important;}`;
 }
 
-// Capture-phase guard. Runs on `document` before the event can reach React's
-// listeners (mounted on the app root, a descendant of document), so navigation
-// and the hover tooltip never fire for a locked server.
-function onCapture(e: Event) {
-    if (e.type === "contextmenu") return;
+// Find the sidebar server item whose box contains a viewport point. We test
+// geometry rather than the event target because a locked icon is
+// pointer-events:none, so the right-click actually lands on whatever is behind it.
+function guildItemAtPoint(x: number, y: number): HTMLElement | null {
+    const items = Array.from(document.querySelectorAll<HTMLElement>(`[data-list-item-id^="${ITEM_PREFIX}"]`));
+    for (const item of items) {
+        const r = item.getBoundingClientRect();
+        if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return item;
+    }
+    return null;
+}
 
-    const me = e as MouseEvent;
-    // For presses/clicks only block the primary (left) button, leaving
-    // right/middle clicks alone. Hover events carry no meaningful button.
-    if (!HOVER_EVENTS.has(e.type) && me.button !== 0) return;
-
-    const target = e.target as HTMLElement | null;
-    const item = target?.closest?.(`[data-list-item-id^="${ITEM_PREFIX}"]`) as HTMLElement | null;
+// Because a locked icon is pointer-events:none, Discord's own context menu (with
+// the "LOCKED" toggle) can't open on it — so give a minimal "Unlock" menu here.
+// Right-clicks on non-locked servers fall through to Discord's normal menu.
+function onServerContextMenu(e: MouseEvent) {
+    const item = guildItemAtPoint(e.clientX, e.clientY);
     if (!item) return;
 
     const guildId = item.getAttribute("data-list-item-id")!.slice(ITEM_PREFIX.length);
     if (!lockedGuilds.has(guildId)) return;
 
+    e.preventDefault();
     e.stopPropagation();
-    if (e.cancelable) e.preventDefault();
+
+    // openContextMenu expects a React-style event; hand it a shim carrying the
+    // cursor position and the icon as the anchor element.
+    const evt = {
+        currentTarget: item,
+        target: item,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        pageX: e.pageX,
+        pageY: e.pageY,
+        nativeEvent: e,
+        preventDefault() { },
+        stopPropagation() { }
+    } as any;
+
+    ContextMenuApi.openContextMenu(evt, () => (
+        <Menu.Menu
+            navId="vc-serverlock-unlock"
+            onClose={ContextMenuApi.closeContextMenu}
+            aria-label="Server Lock"
+        >
+            <Menu.MenuItem
+                id="vc-serverlock-unlock-item"
+                label="Unlock"
+                action={() => setLocked(guildId, false)}
+            />
+        </Menu.Menu>
+    ));
 }
 
 const settings = definePluginSettings({
@@ -258,7 +277,7 @@ export default definePlugin({
 
         updateLockStyle();
         ensureOverlayStyle();
-        for (const ev of BLOCKED_EVENTS) document.addEventListener(ev, onCapture, true);
+        document.addEventListener("contextmenu", onServerContextMenu, true);
 
         // Show/hide the LOCKED screen as the selected server changes.
         SelectedGuildStore.addChangeListener(updateOverlay);
@@ -267,7 +286,7 @@ export default definePlugin({
     },
 
     stop() {
-        for (const ev of BLOCKED_EVENTS) document.removeEventListener(ev, onCapture, true);
+        document.removeEventListener("contextmenu", onServerContextMenu, true);
         SelectedGuildStore.removeChangeListener(updateOverlay);
         window.removeEventListener("resize", updateOverlay);
         document.getElementById(STYLE_ID)?.remove();
