@@ -107,14 +107,45 @@ function applyActiveNowFilter() {
     });
 }
 
-let activeNowObserver: MutationObserver | null = null;
+function isLockedGuildName(name: string): boolean {
+    for (const id of lockedGuilds)
+        if (GuildStore.getGuild(id)?.name === name) return true;
+    return false;
+}
+
+// Discord's server hover tooltip is portaled into the layer container and is
+// triggered by a handler ABOVE the icon in the DOM, so making the icon
+// pointer-events:none doesn't stop it. Instead: when a guild tooltip is added,
+// if its server name matches a locked server, hide it before it paints. Matched
+// on the guild-specific wrapper + name, so non-locked tooltips are untouched.
+function hideLockedTooltips(node: HTMLElement) {
+    const wraps: HTMLElement[] = node.matches?.('[class*="guildTooltipWrapper"]')
+        ? [node]
+        : Array.from(node.querySelectorAll?.<HTMLElement>('[class*="guildTooltipWrapper"]') ?? []);
+
+    for (const wrap of wraps) {
+        const name = wrap.querySelector('[class*="guildNameText"]')?.textContent?.trim();
+        if (name && isLockedGuildName(name)) {
+            const layer = wrap.closest<HTMLElement>('[class*="layer"]') ?? wrap;
+            layer.style.display = "none";
+        }
+    }
+}
+
+let domObserver: MutationObserver | null = null;
 let scanTimer: number | null = null;
-function scheduleActiveNowScan() {
-    if (scanTimer != null) return;
-    scanTimer = window.setTimeout(() => {
-        scanTimer = null;
-        applyActiveNowFilter();
-    }, 120);
+function onDomMutations(mutations: MutationRecord[]) {
+    // Fast, un-throttled path so the tooltip never flashes.
+    for (const m of mutations)
+        for (const node of m.addedNodes)
+            if (node.nodeType === 1) hideLockedTooltips(node as HTMLElement);
+
+    // Throttled path for the Active Now panel.
+    if (scanTimer == null)
+        scanTimer = window.setTimeout(() => {
+            scanTimer = null;
+            applyActiveNowFilter();
+        }, 120);
 }
 
 // "LOCKED" screen shown over the channel list + chat (the middle/right) when a
@@ -362,9 +393,9 @@ export default definePlugin({
         window.addEventListener("resize", updateOverlay);
         updateOverlay();
 
-        // Filter the Active Now panel by watching the DOM for new voice cards.
-        activeNowObserver = new MutationObserver(scheduleActiveNowScan);
-        activeNowObserver.observe(document.body, { childList: true, subtree: true });
+        // Watch the DOM: hide locked-server hover tooltips + filter Active Now.
+        domObserver = new MutationObserver(onDomMutations);
+        domObserver.observe(document.body, { childList: true, subtree: true });
         applyActiveNowFilter();
     },
 
@@ -373,8 +404,8 @@ export default definePlugin({
         SelectedGuildStore.removeChangeListener(updateOverlay);
         window.removeEventListener("resize", updateOverlay);
 
-        activeNowObserver?.disconnect();
-        activeNowObserver = null;
+        domObserver?.disconnect();
+        domObserver = null;
         if (scanTimer != null) {
             clearTimeout(scanTimer);
             scanTimer = null;
