@@ -12,7 +12,7 @@ Right-click any server in the left sidebar and choose **LOCKED**. While a server
 - Its **voice activity is hidden** from the **Active Now** panel on the home/friends page (e.g. a friend sitting in that server's voice channel won't show up).
 - If its **content is opened anyway** (e.g. you follow an **invite link** into it), a gray **LOCKED** screen covers the channel list + chat. The left server rail stays clickable so you can navigate away to another server.
 
-Right-clicking still works on a locked server, so to **unlock** it just right-click again and untick **LOCKED**. You can also see and unlock every locked server from the plugin's settings page.
+**Unlocking is intentionally hard** (this is a self-control tool). A locked server is fully inert — right-clicking it does nothing. The only way to unlock is the plugin's **settings page**, and even there it doesn't happen instantly: pressing **Unlock** starts a countdown, and the server stays locked until you've **restarted (or reloaded) Discord 3 more times**. Each launch ticks the counter down; on the 3rd it actually unlocks. You can press **Cancel** before then to keep it locked. Locking, by contrast, stays easy (right-click → LOCKED).
 
 ## How it works (and what can break)
 

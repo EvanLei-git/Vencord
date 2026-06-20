@@ -10,7 +10,12 @@ import { definePluginSettings } from "@api/Settings";
 import { useForceUpdater } from "@utils/react";
 import definePlugin, { OptionType } from "@utils/types";
 import { Guild } from "@vencord/discord-types";
-import { Button, ContextMenuApi, Forms, GuildStore, Menu, React, SelectedGuildStore } from "@webpack/common";
+import { Button, Forms, GuildStore, Menu, React, SelectedGuildStore } from "@webpack/common";
+
+// Unlocking is intentionally slow: pressing Unlock in settings starts a
+// countdown, and the server stays locked until Discord has been restarted this
+// many more times.
+const UNLOCK_RESTARTS = 3;
 
 const DATA_KEY = "ServerLock_lockedGuilds";
 const STYLE_ID = "vc-serverlock-style";
@@ -22,23 +27,48 @@ const OVERLAY_STYLE_ID = "vc-serverlock-overlay-style";
 const ITEM_PREFIX = "guildsnav___";
 
 // Source of truth, kept in memory and mirrored to DataStore.
+// lockedGuilds: every currently-locked server (greyed / inert / overlaid).
+// pendingUnlocks: guildId -> restarts remaining before it actually unlocks. A
+// pending server is STILL locked until its counter reaches 0.
 let lockedGuilds = new Set<string>();
+let pendingUnlocks = new Map<string, number>();
 
 function isGuildLocked(guildId?: string | null): boolean {
     return !!guildId && lockedGuilds.has(guildId);
 }
 
 function persist() {
-    return DataStore.set(DATA_KEY, lockedGuilds);
+    return DataStore.set(DATA_KEY, {
+        locked: [...lockedGuilds],
+        pending: Object.fromEntries(pendingUnlocks)
+    });
 }
 
-function setLocked(guildId: string, locked: boolean) {
-    if (locked) lockedGuilds.add(guildId);
-    else lockedGuilds.delete(guildId);
-    persist();
+function refresh() {
     updateLockStyle();
     updateOverlay();
     applyActiveNowFilter();
+}
+
+function lockGuild(guildId: string) {
+    lockedGuilds.add(guildId);
+    pendingUnlocks.delete(guildId); // locking cancels any in-progress unlock
+    persist();
+    refresh();
+}
+
+// Begin the slow unlock. The server stays locked; only restarts can finish it.
+function requestUnlock(guildId: string) {
+    if (!lockedGuilds.has(guildId)) return;
+    pendingUnlocks.set(guildId, UNLOCK_RESTARTS);
+    persist();
+    refresh();
+}
+
+function cancelUnlock(guildId: string) {
+    pendingUnlocks.delete(guildId);
+    persist();
+    refresh();
 }
 
 // ----- Active Now panel filtering --------------------------------------------
@@ -181,9 +211,8 @@ function guildItemAtPoint(x: number, y: number): HTMLElement | null {
     return null;
 }
 
-// Because a locked icon is pointer-events:none, Discord's own context menu (with
-// the "LOCKED" toggle) can't open on it — so give a minimal "Unlock" menu here.
-// Right-clicks on non-locked servers fall through to Discord's normal menu.
+// Locked servers are fully inert: their right-click does nothing. Unlocking is
+// only possible from the plugin settings (and even then takes several restarts).
 function onServerContextMenu(e: MouseEvent) {
     const item = guildItemAtPoint(e.clientX, e.clientY);
     if (!item) return;
@@ -193,34 +222,6 @@ function onServerContextMenu(e: MouseEvent) {
 
     e.preventDefault();
     e.stopPropagation();
-
-    // openContextMenu expects a React-style event; hand it a shim carrying the
-    // cursor position and the icon as the anchor element.
-    const evt = {
-        currentTarget: item,
-        target: item,
-        clientX: e.clientX,
-        clientY: e.clientY,
-        pageX: e.pageX,
-        pageY: e.pageY,
-        nativeEvent: e,
-        preventDefault() { },
-        stopPropagation() { }
-    } as any;
-
-    ContextMenuApi.openContextMenu(evt, () => (
-        <Menu.Menu
-            navId="vc-serverlock-unlock"
-            onClose={ContextMenuApi.closeContextMenu}
-            aria-label="Server Lock"
-        >
-            <Menu.MenuItem
-                id="vc-serverlock-unlock-item"
-                label="Unlock"
-                action={() => setLocked(guildId, false)}
-            />
-        </Menu.Menu>
-    ));
 }
 
 const settings = definePluginSettings({
@@ -246,24 +247,48 @@ function LockedServersList() {
 
     return (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <Forms.FormText style={{ marginBottom: 4, color: "var(--text-muted)" }}>
+                Unlocking is deliberate: after you press Unlock, the server stays locked until you have
+                restarted (or reloaded) Discord {UNLOCK_RESTARTS} more times.
+            </Forms.FormText>
             {ids.map(id => {
                 const guild = GuildStore.getGuild(id);
+                const pending = pendingUnlocks.get(id);
                 return (
                     <div
                         key={id}
                         style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}
                     >
                         <Forms.FormText>{guild?.name ?? `Unknown server (${id})`}</Forms.FormText>
-                        <Button
-                            size={Button.Sizes.SMALL}
-                            color={Button.Colors.PRIMARY}
-                            onClick={() => {
-                                setLocked(id, false);
-                                forceUpdate();
-                            }}
-                        >
-                            Unlock
-                        </Button>
+                        {pending == null ? (
+                            <Button
+                                size={Button.Sizes.SMALL}
+                                color={Button.Colors.RED}
+                                onClick={() => {
+                                    requestUnlock(id);
+                                    forceUpdate();
+                                }}
+                            >
+                                Unlock
+                            </Button>
+                        ) : (
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <Forms.FormText style={{ color: "var(--text-muted)" }}>
+                                    {pending} restart{pending === 1 ? "" : "s"} left
+                                </Forms.FormText>
+                                <Button
+                                    size={Button.Sizes.SMALL}
+                                    color={Button.Colors.PRIMARY}
+                                    look={Button.Looks.LINK}
+                                    onClick={() => {
+                                        cancelUnlock(id);
+                                        forceUpdate();
+                                    }}
+                                >
+                                    Cancel
+                                </Button>
+                            </div>
+                        )}
                     </div>
                 );
             })}
@@ -281,14 +306,16 @@ const guildContextPatch: NavContextMenuPatchCallback = (children, { guild }: { g
             id="vc-serverlock-toggle"
             label="LOCKED"
             checked={locked}
-            action={() => setLocked(guild.id, !locked)}
+            // Once locked, it can't be unticked here — unlock only from settings.
+            disabled={locked}
+            action={() => { if (!locked) lockGuild(guild.id); }}
         />
     );
 };
 
 export default definePlugin({
     name: "ServerLock",
-    description: "Right-click a server and choose \"LOCKED\" to grey it out, make it un-clickable, suppress its hover tooltip, hide its voice activity from the \"Active Now\" panel, and show a gray LOCKED screen if its content is opened (e.g. via an invite link). Right-click again to unlock.",
+    description: "Right-click a server and choose \"LOCKED\" to grey it out, make it un-clickable, suppress its hover tooltip, hide its voice activity from the \"Active Now\" panel, and show a gray LOCKED screen if its content is opened (e.g. via an invite link). Unlocking is intentionally hard: only from this plugin's settings, and it takes effect after restarting Discord 3 times.",
     authors: [{ name: "Evan", id: 0n }],
     tags: ["Servers", "Privacy", "Utility"],
     settings,
@@ -299,9 +326,32 @@ export default definePlugin({
     },
 
     async start() {
-        const stored = await DataStore.get(DATA_KEY);
-        // Tolerate an older array-shaped value as well as a Set.
-        lockedGuilds = stored instanceof Set ? stored : new Set(Array.isArray(stored) ? stored : []);
+        const stored: any = await DataStore.get(DATA_KEY);
+        if (stored instanceof Set || Array.isArray(stored)) {
+            // Old format: a bare Set/array of locked ids, no pending unlocks.
+            lockedGuilds = new Set(stored);
+            pendingUnlocks = new Map();
+        } else if (stored && typeof stored === "object") {
+            lockedGuilds = new Set<string>(stored.locked ?? []);
+            pendingUnlocks = new Map<string, number>(Object.entries(stored.pending ?? {}));
+        } else {
+            lockedGuilds = new Set();
+            pendingUnlocks = new Map();
+        }
+
+        // Each launch counts as one restart toward any pending unlock.
+        let changed = false;
+        for (const [id, n] of [...pendingUnlocks]) {
+            changed = true;
+            const left = n - 1;
+            if (left <= 0) {
+                lockedGuilds.delete(id);
+                pendingUnlocks.delete(id);
+            } else {
+                pendingUnlocks.set(id, left);
+            }
+        }
+        if (changed) await persist();
 
         updateLockStyle();
         ensureOverlayStyle();
