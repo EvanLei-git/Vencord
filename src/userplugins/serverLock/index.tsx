@@ -151,13 +151,22 @@ function updateLockStyle() {
         document.head.appendChild(el);
     }
 
-    const selector = [...lockedGuilds]
+    const ids = [...lockedGuilds];
+    const greySelector = ids
         .map(id => `[data-list-item-id="${ITEM_PREFIX}${id}"]`)
         .join(",");
+    // The item AND every descendant — a child blob with its own pointer-events
+    // would otherwise stay hit-testable and re-trigger the hover tooltip/click.
+    const inertSelector = ids
+        .flatMap(id => {
+            const s = `[data-list-item-id="${ITEM_PREFIX}${id}"]`;
+            return [s, `${s} *`];
+        })
+        .join(",");
 
-    // pointer-events:none makes the icon physically inert — no hover popout,
-    // no tooltip, no click — far more reliable than intercepting events.
-    el.textContent = `${selector}{filter:grayscale(1) brightness(.65);opacity:.5;pointer-events:none!important;cursor:default!important;}`;
+    el.textContent =
+        `${greySelector}{filter:grayscale(1) brightness(.65);opacity:.5;cursor:default!important;}` +
+        `${inertSelector}{pointer-events:none!important;}`;
 }
 
 // Find the sidebar server item whose box contains a viewport point. We test
